@@ -1,6 +1,8 @@
 #pragma once
 
 #include <Arduino.h>
+#include <map>
+#include <string>
 
 class NimBLEServer;
 class NimBLEService;
@@ -11,6 +13,20 @@ class NimBLECharacteristic;
  *
  * This class is the public entry point for initializing controller transport,
  * processing runtime communication, and exposing connection state to firmware.
+ *
+ * ## Command model
+ *
+ * The mobile app sends named command frames over BLE RX while a button is held
+ * (heartbeat pattern). Any received command is tracked automatically — no
+ * registration required. Firmware polls `isActive()` in `loop()` to read
+ * button state, exactly like `digitalRead()`.
+ *
+ * Wire format: `NAME\n` or `NAME:payload\n`
+ *
+ * Standard command names:
+ *   L_UP  L_DOWN  L_LEFT  L_RIGHT  L_CENTER
+ *   R_UP  R_DOWN  R_LEFT  R_RIGHT  R_CENTER
+ *   BTN_1  BTN_2  BTN_3  BTN_4
  */
 class MavistraController {
  public:
@@ -57,7 +73,8 @@ class MavistraController {
   /**
    * @brief Process controller runtime tasks.
    *
-   * Call continuously from Arduino `loop()`.
+   * Call continuously from Arduino `loop()`. Drives the heartbeat timeout
+   * sweep that marks timed-out commands as inactive.
    */
   void loop();
 
@@ -72,39 +89,63 @@ class MavistraController {
    */
   void reset();
 
+  /**
+   * @brief Report whether a named command is currently active.
+   *
+   * A command is active while the app continues to send heartbeat frames for
+   * it within the timeout window. Returns `false` when the button is released
+   * (frames stop arriving) or no frame for this name has ever been received.
+   *
+   * @param name Command name (e.g. "L_UP", "BTN_1").
+   * @return `true` if a frame was received within the timeout window.
+   */
+  bool isActive(const char* name) const;
+
+  /**
+   * @brief Override the heartbeat timeout used to determine command release.
+   *
+   * Call before `begin()`. Default is 150 ms. The app should send heartbeats
+   * at an interval well below this value (e.g. every 50 ms).
+   *
+   * @param ms Timeout in milliseconds.
+   */
+  void setCommandTimeout(uint32_t ms);
+
+ /// Internal per-command heartbeat state. Exposed for use by BLE callbacks in
+  /// the implementation file; not intended for use by firmware authors.
+  struct CommandEntry {
+    uint32_t lastSeenMs; ///< Timestamp of the most recent received frame.
+    bool     active;     ///< True while within the timeout window.
+  };
+
  private:
+  // ---- heartbeat timeout configuration ----
+  // commandTimeoutMs_ is the sole backing store for setCommandTimeout().
+  static constexpr uint32_t kDefaultCommandTimeoutMs = 150U;
+  uint32_t commandTimeoutMs_;
+
+  // ---- command heartbeat tracking ----
+  std::map<std::string, CommandEntry> commands_;
+
+  // ---- BLE state ----
+  bool initialized_;
+  bool connected_;
+  bool lastLoggedConnected_;
+  uint32_t lastCommandMs_;
+  char advertisingName_[32];
+  bool bleActive_;
+  NimBLEServer* server_;
+  NimBLEService* commandService_;
+  NimBLECharacteristic* rxCommandCharacteristic_;
+  NimBLECharacteristic* txEventCharacteristic_;
+
   /**
    * @brief Free or detach owned runtime resources.
    */
   void release();
 
-  /// True once `begin()` has completed successfully.
-  bool initialized_;
-
-  /// True when an app/client connection is currently active.
-  bool connected_;
-
-  /// Last connection state logged to Serial.
-  bool lastLoggedConnected_;
-
-  /// Timestamp of the last command/activity in milliseconds.
-  uint32_t lastCommandMs_;
-
-  /// BLE advertising name buffer (null-terminated).
-  char advertisingName_[32];
-
-  /// True when NimBLE runtime has been initialized and advertising started.
-  bool bleActive_;
-
-  /// BLE server instance.
-  NimBLEServer* server_;
-
-  /// Primary command service.
-  NimBLEService* commandService_;
-
-  /// RX command characteristic (app -> device).
-  NimBLECharacteristic* rxCommandCharacteristic_;
-
-  /// TX event/status characteristic (device -> app).
-  NimBLECharacteristic* txEventCharacteristic_;
+  /**
+   * @brief Clear active state on all tracked commands immediately.
+   */
+  void clearAllActive();
 };

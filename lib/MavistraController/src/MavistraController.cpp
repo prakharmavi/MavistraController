@@ -4,14 +4,30 @@
 #include <string>
 
 namespace {
-constexpr const char* kServiceUuid = "19b10000-e8f2-537e-4f6c-d104768a1214";
-constexpr const char* kRxCommandUuid = "19b10001-e8f2-537e-4f6c-d104768a1214";
-constexpr const char* kTxEventUuid = "19b10002-e8f2-537e-4f6c-d104768a1214";
+constexpr const char* kServiceUuid    = "19b10000-e8f2-537e-4f6c-d104768a1214";
+constexpr const char* kRxCommandUuid  = "19b10001-e8f2-537e-4f6c-d104768a1214";
+constexpr const char* kTxEventUuid    = "19b10002-e8f2-537e-4f6c-d104768a1214";
 
+constexpr const char* kStatusConnected    = "status:connected";
+constexpr const char* kStatusDisconnected = "status:disconnected";
+
+// ---------------------------------------------------------------------------
+// Server callbacks — forward connect/disconnect to the controller via a raw
+// pointer. The controller outlives all BLE callbacks because NimBLE is torn
+// down in release() before the controller is destroyed.
+// ---------------------------------------------------------------------------
 class MavistraServerCallbacks : public NimBLEServerCallbacks {
  public:
+  explicit MavistraServerCallbacks(NimBLECharacteristic* txCharacteristic)
+      : txCharacteristic_(txCharacteristic) {}
+
   void onConnect(NimBLEServer* server) {
     (void)server;
+    if (txCharacteristic_ != nullptr) {
+      txCharacteristic_->setValue(kStatusConnected);
+      txCharacteristic_->notify();
+    }
+    Serial.println("[MavistraController] BLE client connected");
   }
 
   void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) {
@@ -21,6 +37,11 @@ class MavistraServerCallbacks : public NimBLEServerCallbacks {
 
   void onDisconnect(NimBLEServer* server) {
     (void)server;
+    if (txCharacteristic_ != nullptr) {
+      txCharacteristic_->setValue(kStatusDisconnected);
+      txCharacteristic_->notify();
+    }
+    Serial.println("[MavistraController] BLE client disconnected");
   }
 
   void onDisconnect(NimBLEServer* server, NimBLEConnInfo& connInfo, int reason) {
@@ -28,34 +49,60 @@ class MavistraServerCallbacks : public NimBLEServerCallbacks {
     (void)reason;
     onDisconnect(server);
   }
+
+ private:
+  NimBLECharacteristic* txCharacteristic_;
 };
 
+// ---------------------------------------------------------------------------
+// RX characteristic callbacks — parse incoming frames and update command state.
+//
+// Frame format: NAME\n  or  NAME:payload\n
+// Trailing \r\n is stripped. Split on first ':' to separate name from payload.
+// ---------------------------------------------------------------------------
 class MavistraRxCallbacks : public NimBLECharacteristicCallbacks {
  public:
-  explicit MavistraRxCallbacks(NimBLECharacteristic* txCharacteristic)
-      : txCharacteristic_(txCharacteristic) {}
+  explicit MavistraRxCallbacks(std::map<std::string, MavistraController::CommandEntry>* commands)
+      : commands_(commands) {}
 
   void onWrite(NimBLECharacteristic* characteristic) {
-    if (characteristic == nullptr) {
+    if (characteristic == nullptr || commands_ == nullptr) {
       return;
     }
 
-    const std::string raw = characteristic->getValue();
-    Serial.print("[MavistraController] RX raw: ");
+    std::string raw = characteristic->getValue();
     if (raw.empty()) {
-      Serial.println("<empty>");
       return;
     }
 
-    Serial.println(raw.c_str());
-
-    if (txCharacteristic_ != nullptr) {
-      const std::string response = std::string("recieved ") + raw;
-      txCharacteristic_->setValue(response);
-      txCharacteristic_->notify();
-      Serial.print("[MavistraController] TX: ");
-      Serial.println(response.c_str());
+    // Strip trailing CR / LF.
+    while (!raw.empty() && (raw.back() == '\n' || raw.back() == '\r')) {
+      raw.pop_back();
     }
+    if (raw.empty()) {
+      return;
+    }
+
+    // Split on first ':'.
+    std::string name;
+    const auto colonPos = raw.find(':');
+    if (colonPos == std::string::npos) {
+      name = raw;
+    } else {
+      name = raw.substr(0U, colonPos);
+    }
+
+    if (name.empty()) {
+      return;
+    }
+
+    // Update heartbeat state. Insert a new entry if this name is new.
+    auto& entry = (*commands_)[name];
+    entry.lastSeenMs = static_cast<uint32_t>(millis());
+    entry.active = true;
+
+    Serial.print("[MavistraController] cmd: ");
+    Serial.println(name.c_str());
   }
 
   void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& connInfo) {
@@ -64,12 +111,18 @@ class MavistraRxCallbacks : public NimBLECharacteristicCallbacks {
   }
 
  private:
-  NimBLECharacteristic* txCharacteristic_;
+  std::map<std::string, MavistraController::CommandEntry>* commands_;
 };
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// MavistraController
+// ---------------------------------------------------------------------------
+
 MavistraController::MavistraController(const char* advertisingName)
-    : initialized_(false),
+    : commandTimeoutMs_(kDefaultCommandTimeoutMs),
+      commands_(),
+      initialized_(false),
       connected_(false),
       lastLoggedConnected_(false),
       lastCommandMs_(0U),
@@ -106,7 +159,6 @@ bool MavistraController::begin() {
     NimBLEDevice::deinit(true);
     return false;
   }
-  server_->setCallbacks(new MavistraServerCallbacks());
 
   commandService_ = server_->createService(kServiceUuid);
   if (commandService_ == nullptr) {
@@ -136,7 +188,9 @@ bool MavistraController::begin() {
     rxCommandCharacteristic_ = nullptr;
     return false;
   }
-  rxCommandCharacteristic_->setCallbacks(new MavistraRxCallbacks(txEventCharacteristic_));
+
+  rxCommandCharacteristic_->setCallbacks(new MavistraRxCallbacks(&commands_));
+  server_->setCallbacks(new MavistraServerCallbacks(txEventCharacteristic_));
 
   commandService_->start();
 
@@ -169,13 +223,12 @@ void MavistraController::loop() {
     return;
   }
 
+  // Track connection state for advertising restart on disconnect.
   if (server_ != nullptr) {
     connected_ = server_->getConnectedCount() > 0;
     if (connected_ != lastLoggedConnected_) {
-      if (connected_) {
-        Serial.println("[MavistraController] BLE client connected");
-      } else {
-        Serial.println("[MavistraController] BLE client disconnected");
+      if (!connected_) {
+        clearAllActive();
         NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
         if (advertising != nullptr) {
           advertising->start();
@@ -188,16 +241,42 @@ void MavistraController::loop() {
     }
   }
 
-  // TODO: process BLE events, parse incoming commands, dispatch handlers.
+  // Heartbeat timeout sweep — mark commands inactive if no frame arrived in time.
+  const uint32_t now = millis();
+  for (auto& kv : commands_) {
+    CommandEntry& entry = kv.second;
+    if (entry.active && (now - entry.lastSeenMs) > commandTimeoutMs_) {
+      entry.active = false;
+    }
+  }
 }
 
 bool MavistraController::isConnected() const { return connected_; }
+
+bool MavistraController::isActive(const char* name) const {
+  if (name == nullptr) {
+    return false;
+  }
+  const auto it = commands_.find(std::string(name));
+  return it != commands_.end() && it->second.active;
+}
+
+void MavistraController::setCommandTimeout(uint32_t ms) {
+  commandTimeoutMs_ = ms;
+}
 
 void MavistraController::reset() {
   release();
   initialized_ = false;
   connected_ = false;
   lastCommandMs_ = 0U;
+  commands_.clear();
+}
+
+void MavistraController::clearAllActive() {
+  for (auto& kv : commands_) {
+    kv.second.active = false;
+  }
 }
 
 void MavistraController::release() {
