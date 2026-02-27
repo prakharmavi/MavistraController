@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <MavistraController.h>
 
-MavistraController controller("Vanshaj's Bot");
+MavistraController controller("Vanshaj's controller bot");
 
 static constexpr uint8_t kBuzzerPin = 15;
 
@@ -91,7 +91,6 @@ void setup() {
 
   animateBoot();
 
-  controller.setCommandTimeout(300);
   controller.begin();
 }
 
