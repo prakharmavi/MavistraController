@@ -205,6 +205,10 @@ bool MavistraController::begin() {
     return false;
   }
 
+  // Put the device name in the scan response so iOS can see it.
+  NimBLEAdvertisementData scanData;
+  scanData.setName(advertisingName_);
+  advertising->setScanResponseData(scanData);
   advertising->addServiceUUID(kServiceUuid);
   advertising->start();
   Serial.println("[MavistraController] Advertising started");
