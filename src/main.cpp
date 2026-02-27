@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <MavistraController.h>
 
-MavistraController controller("Vanshaj's controller bot");
+MavistraController controller("Mavistra Demo bot");
 
 static constexpr uint8_t kBuzzerPin = 15;
 
