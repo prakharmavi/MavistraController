@@ -132,6 +132,13 @@ MavistraController::MavistraController(const char* advertisingName)
       commandService_(nullptr),
       rxCommandCharacteristic_(nullptr),
       txEventCharacteristic_(nullptr) {
+  static bool sInstantiated = false;
+  if (sInstantiated) {
+    Serial.println("[MavistraController] FATAL: only one instance allowed — remove the extra MavistraController declaration");
+    abort();
+  }
+  sInstantiated = true;
+
   if (advertisingName == nullptr || advertisingName[0] == '\0') {
     strncpy(advertisingName_, "MavistraController", sizeof(advertisingName_) - 1U);
     advertisingName_[sizeof(advertisingName_) - 1U] = '\0';

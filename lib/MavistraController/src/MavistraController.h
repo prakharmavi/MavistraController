@@ -14,6 +14,24 @@ class NimBLECharacteristic;
  * This class is the public entry point for initializing controller transport,
  * processing runtime communication, and exposing connection state to firmware.
  *
+ * ## Singleton usage
+ *
+ * Only one instance may exist. Obtain it via `instance()`:
+ *
+ * ```cpp
+ * // In setup() — pass the advertising name once:
+ * MavistraController::instance("MyDevice").begin();
+ *
+ * // Everywhere else — omit the name:
+ * MavistraController::instance().loop();
+ * bool active = MavistraController::instance().isActive("L_UP");
+ * ```
+ *
+ * Constructing directly is a compile error:
+ * ```cpp
+ * MavistraController ctrl("x");   // ❌ error: constructor is private
+ * ```
+ *
  * ## Command model
  *
  * The mobile app sends named command frames over BLE RX while a button is held
@@ -31,7 +49,12 @@ class NimBLECharacteristic;
 class MavistraController {
  public:
   /**
-   * @brief Construct a controller with a BLE advertising name.
+   * @brief Construct the controller with a BLE advertising name.
+   *
+   * Only one instance may exist per program. Constructing a second one aborts
+   * immediately with a Serial message — caught at development time the moment
+   * the firmware boots.
+   *
    * @param advertisingName Device name presented during BLE advertising.
    */
   explicit MavistraController(const char* advertisingName);
@@ -41,25 +64,10 @@ class MavistraController {
    */
   ~MavistraController();
 
-  /**
-   * @brief Copy constructor is disabled to prevent duplicating runtime state.
-   */
-  MavistraController(const MavistraController& other) = delete;
-
-  /**
-   * @brief Move constructor is disabled to keep ownership stable.
-   */
-  MavistraController(MavistraController&& other) = delete;
-
-  /**
-   * @brief Copy assignment is disabled to prevent state aliasing.
-   */
-  MavistraController& operator=(const MavistraController& other) = delete;
-
-  /**
-   * @brief Move assignment is disabled to keep ownership stable.
-   */
-  MavistraController& operator=(MavistraController&& other) = delete;
+  MavistraController(const MavistraController&)            = delete;
+  MavistraController(MavistraController&&)                 = delete;
+  MavistraController& operator=(const MavistraController&) = delete;
+  MavistraController& operator=(MavistraController&&)      = delete;
 
   /**
    * @brief Initialize the controller and prepare communication transport.
